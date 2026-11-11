@@ -26,3 +26,11 @@ test('lossy, unknown, mislabeled bytes and unbounded responses fail closed', asy
   for (const bytes of [Buffer.from('OggSOpusHead'), Buffer.from('ID3'), Buffer.alloc(42)]) await assert.rejects(validateStream(stream, { ...options, probe: probe(bytes) }));
   await assert.rejects(validateStream(stream, { ...options, probe: async () => new Response(flac()) }));
 });
+
+test('Qobuz Akamai etsp recognized only with vendor signature shape and original TTL limits', async () => {
+  const url = `https://streaming-qobuz-std.akamaized.net/file?etsp=${now/1000+900}&hmac=${'a'.repeat(27)}`;
+  assert.equal((await validateStream({ ...stream, url }, options)).codec, 'flac');
+  for (const bad of [url.replace('streaming-qobuz-std.akamaized.net','cdn.example'), url.replace('hmac=','missing='), url.replace('a'.repeat(27),'invalid'), url.replace(String(now/1000+900),String(now/1000+3600)), url.replace(String(now/1000+900),String(now/1000-1))]) {
+    await assert.rejects(validateStream({ ...stream, url: bad }, options));
+  }
+});

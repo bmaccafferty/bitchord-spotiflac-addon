@@ -23,6 +23,13 @@ export async function validateStream(stream, { now = Date.now(), resolve = looku
   // Direct URLs must have provider-enforced expiry; we cannot invent an expiry
   // for a permanent URL. Never fetch media or send BitChord/provider credentials.
   let exp = Number(url.searchParams.get('exp') || url.searchParams.get('expires') || url.searchParams.get('Expires')) * 1000;
+  // Qobuz's actual Akamai URLs use etsp (epoch seconds) plus a URL-safe
+  // HMAC. Recognize only the observed vendor host/shape; preserve TTL bounds.
+  if (url.hostname === 'streaming-qobuz-std.akamaized.net' &&
+      /^\d{10}$/.test(url.searchParams.get('etsp') || '') &&
+      /^[A-Za-z0-9_-]{27}$/.test(url.searchParams.get('hmac') || '')) {
+    exp = Number(url.searchParams.get('etsp')) * 1000;
+  }
   const date = url.searchParams.get('X-Amz-Date');
   const ttl = Number(url.searchParams.get('X-Amz-Expires'));
   if (date && /^\d{8}T\d{6}Z$/.test(date) && ttl > 0) {
