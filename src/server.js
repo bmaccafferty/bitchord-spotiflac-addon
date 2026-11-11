@@ -8,7 +8,7 @@ import { tidalConfigured, tidalHealth, tidalResolveStream, tidalSearch } from '.
 
 const PORT = Number(process.env.PORT || 8080);
 const NAME = process.env.ADDON_NAME || 'SpotiFLAC Multi-Source Lossless';
-const VERSION = '0.7.0';
+const VERSION = '0.7.1';
 const hosts = String(process.env.BITCHORD_HOSTS || '').split(',').map(h => h.trim()).filter(Boolean);
 if (!hosts.length || hosts.some(h => !/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/i.test(h))) {
   throw new Error('BITCHORD_HOSTS must list the public addon hostnames without scheme, port or path');
@@ -113,7 +113,7 @@ function authError(res) {
   return json(res, 503, {
     error: 'verification_required',
     message: 'Qobuz signed-session verification is required.',
-    authUrl: status.auth_url || undefined
+    // Human verification is private operator provisioning.
   });
 }
 

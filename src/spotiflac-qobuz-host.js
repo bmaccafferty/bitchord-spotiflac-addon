@@ -78,9 +78,11 @@ function responseObject(response) {
   };
 }
 
-class SignedSession {
+export class SignedSession {
   constructor(config) {
     this.config = config;
+    this.http = config.http || syncHttp;
+    this.now = config.now || Date.now;
     this.file = process.env.QOBUZ_SESSION_FILE ||
       path.resolve(process.env.DATA_DIR || path.join(process.cwd(), 'data'), 'qobuz-session.json');
     this.lastAuthUrl = '';
@@ -104,6 +106,7 @@ class SignedSession {
     fs.mkdirSync(path.dirname(this.file), { recursive: true });
     const tmp = this.file + '.tmp';
     fs.writeFileSync(tmp, JSON.stringify(this.record, null, 2), { mode: 0o600 });
+    fs.chmodSync(tmp, 0o600);
     fs.renameSync(tmp, this.file);
   }
 
@@ -119,17 +122,19 @@ class SignedSession {
     const secret = String(this.record.session_secret || '').trim();
     if (!id || !secret) return false;
     const expires = Date.parse(String(this.record.expires_at || ''));
-    return !Number.isFinite(expires) || Date.now() < expires;
+    return Number.isFinite(expires) && this.now() < expires;
   }
 
   status() {
+    this.load(); // Private provisioning can update the persisted session without a restart.
+    this.lastAuthUrl = this.record.pending?.expires_at > this.now() ? this.record.pending.url : '';
     return {
       authenticated: this.isUsable(),
       verification_required: Boolean(this.lastAuthUrl),
       auth_url: this.lastAuthUrl,
       expires_at: String(this.record.expires_at || ''),
       install_id: this.installId,
-      session_id: String(this.record.session_id || '')
+      session_id: ''
     };
   }
 
@@ -141,11 +146,15 @@ class SignedSession {
   }
 
   bootstrap() {
+    if (this.record.pending?.expires_at > this.now()) {
+      this.lastAuthUrl = this.record.pending.url;
+      return { needsVerification: true, auth_url: this.lastAuthUrl };
+    }
     const url = queryUrl(this.endpoint(this.config.endpoints.bootstrap), {
       app_version: this.config.appVersion,
       install_id: this.installId
     });
-    const response = responseObject(syncHttp(url, 'GET', '', {
+    const response = responseObject(this.http(url, 'GET', '', {
       Accept: 'application/json',
       'User-Agent': 'SpotiFLAC-Mobile/' + this.config.appVersion
     }, 15000));
@@ -153,7 +162,10 @@ class SignedSession {
     if (response.statusCode >= 200 && response.statusCode < 300) {
       let payload = {};
       try { payload = JSON.parse(response.body || '{}'); } catch {}
-      if (payload.session_id && payload.session_secret && payload.expires_at) {
+      if (typeof payload.session_id === 'string' && payload.session_id.trim() &&
+        typeof payload.session_secret === 'string' && payload.session_secret.trim() &&
+        typeof payload.expires_at === 'string' && Date.parse(payload.expires_at) > this.now()) {
+        delete this.record.pending;
         this.record.session_id = String(payload.session_id);
         this.record.session_secret = String(payload.session_secret);
         this.record.expires_at = String(payload.expires_at);
@@ -166,26 +178,46 @@ class SignedSession {
         return { success: true };
       }
 
-      const authUrl = String(payload.auth_url || payload.challenge_url || '').trim();
-      if (authUrl) {
+      // Official Mornye signed_session/protocol.rs: challenge_url (v2grant).
+      const challenge = payload.challenge_id;
+      const ttl = Number(payload.expires_in);
+      if (typeof challenge === 'string' && /^[a-zA-Z0-9_-]{1,256}$/.test(challenge) &&
+          Number.isFinite(ttl) && ttl > 0 && ttl <= 600) {
+        const state = randomHex(24);
+        const callback = queryUrl(this.config.callbackUrl, { cb_version: 'v2grant', state });
+        const authUrl = queryUrl(this.endpoint(this.config.endpoints.challenge), { id: challenge, cb: callback });
+        this.record.pending = { state, url: authUrl, expires_at: this.now() + ttl * 1000 };
         this.lastAuthUrl = authUrl;
-        return { needsVerification: true, auth_url: authUrl, open_auth_url: authUrl };
+        this.save();
+        return { needsVerification: true, auth_url: authUrl };
       }
+
     }
 
     const error = new Error('signed-session bootstrap failed: HTTP ' + response.statusCode);
-    error.response = response;
+    // Never attach provider bodies or capability material to errors.
     throw error;
   }
 
   ensureAuthenticated() {
     if (this.isUsable()) return { success: true };
-    this.clear();
     return this.bootstrap();
   }
 
   completeGrant(grant) {
-    const value = String(grant || '').trim();
+    let value = String(grant || '').trim();
+    const pending = this.record.pending;
+    if (!pending || pending.expires_at <= this.now()) return { success: false, error: 'Fresh human verification required' };
+    try {
+      const callback = new URL(value);
+      const expected = new URL(this.config.callbackUrl);
+      if (callback.protocol !== expected.protocol || callback.host !== expected.host ||
+          callback.pathname !== expected.pathname || callback.searchParams.get('state') !== pending.state) {
+        return { success: false, error: 'Verification callback mismatch' };
+      }
+      value = callback.searchParams.get('grant') || '';
+    } catch { return { success: false, error: 'Full verification callback URL required' }; }
+
     if (!value) return { success: false, error: 'grant is required' };
 
     const url = this.endpoint(this.config.endpoints.exchange);
@@ -195,7 +227,7 @@ class SignedSession {
       app_version: this.config.appVersion,
       platform: this.config.platform
     });
-    const response = responseObject(syncHttp(url, 'POST', body, {
+    const response = responseObject(this.http(url, 'POST', body, {
       Accept: 'application/json',
       'Content-Type': 'application/json',
       'User-Agent': 'SpotiFLAC-Mobile/' + this.config.appVersion
@@ -205,7 +237,10 @@ class SignedSession {
     try { payload = JSON.parse(response.body || '{}'); } catch {}
 
     if (response.statusCode >= 200 && response.statusCode < 300 &&
-        payload.session_id && payload.session_secret && payload.expires_at) {
+        typeof payload.session_id === 'string' && payload.session_id.trim() &&
+        typeof payload.session_secret === 'string' && payload.session_secret.trim() &&
+        typeof payload.expires_at === 'string' && Date.parse(payload.expires_at) > this.now()) {
+      delete this.record.pending;
       this.record.session_id = String(payload.session_id);
       this.record.session_secret = String(payload.session_secret);
       this.record.expires_at = String(payload.expires_at);
@@ -222,7 +257,7 @@ class SignedSession {
       success: false,
       error: 'session exchange failed',
       statusCode: response.statusCode,
-      detail: payload.error || payload.message || response.body.slice(0, 300)
+      detail: 'Provider did not return a valid session'
     };
   }
 
@@ -295,10 +330,11 @@ class SignedSession {
       headers[key] = String(value);
     }
 
-    let response = responseObject(syncHttp(url, String(method).toUpperCase(), bodyText, headers, 30000));
+    let response = responseObject(this.http(url, String(method).toUpperCase(), bodyText, headers, 30000));
 
     if ((response.statusCode === 401 || response.statusCode === 428) &&
         /VERIFY_REQUIRED|SESSION_INVALID|verify/i.test(response.body || '')) {
+      this.clear();
       try {
         const boot = this.bootstrap();
         if (boot.needsVerification) return boot;
@@ -435,14 +471,7 @@ export class SpotiFLACQobuzHost {
   }
 
   completeAuth(value) {
-    let grant = String(value || '').trim();
-    if (grant.includes('://')) {
-      try {
-        const u = new URL(grant);
-        grant = u.searchParams.get('grant') || '';
-      } catch {}
-    }
-    return this.session.completeGrant(grant);
+    return this.session.completeGrant(value);
   }
 
   clearAuth() {

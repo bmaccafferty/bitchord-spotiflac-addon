@@ -12,7 +12,7 @@ export function publicAddress(address) {
   return isIP(address) === 6 && /^[23]/.test(address) && !/^2001:(db8|0:|10:|20:)/i.test(address);
 }
 
-export async function validateStream(stream, { now = Date.now(), resolve = lookup } = {}) {
+export async function validateStream(stream, { now = Date.now(), resolve = lookup, probe = fetch } = {}) {
   const url = new URL(stream.url);
   if (url.protocol !== 'https:' || url.username || url.password || url.hash ||
       (url.port && url.port !== '443') || stream.encrypted || /atmos|eac3|joc/i.test(stream.codec || '')) {
@@ -32,15 +32,42 @@ export async function validateStream(stream, { now = Date.now(), resolve = looku
     throw new Error('Provider must supply a signed URL with 5–30 minutes remaining');
   }
   if (!['flac', 'alac', 'aac', 'mp3', 'opus'].includes(String(stream.codec).toLowerCase())) throw new Error('Unknown codec');
-  const bitDepth = Number(stream.bitDepth);
-  let sampleRate = Number(stream.sampleRate);
+  // This addon promises lossless for every exposed quality tier. Metadata alone
+  // is insufficient: reject lossy providers and inspect a bounded FLAC header.
+  // ALAC needs a supported bounded MP4 parser before it can be offered here.
+  if (String(stream.codec).toLowerCase() !== 'flac') throw new Error('Verified lossless FLAC unavailable');
+  const response = await probe(url.href, { headers: { Range: 'bytes=0-1023' },
+    redirect: 'error', signal: AbortSignal.timeout(10000) });
+  let bytes = Buffer.alloc(0);
+  try {
+    const range = /^bytes 0-(\d+)\//.exec(response.headers.get('content-range') || '');
+    if (response.status !== 206 || !range || Number(range[1]) > 1023) {
+      throw new Error('Provider did not support bounded media verification');
+    }
+    const reader = response.body.getReader();
+    try {
+      while (bytes.length < 42) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        bytes = Buffer.concat([bytes, Buffer.from(value).subarray(0, 1024 - bytes.length)]);
+      }
+    } finally { await reader.cancel(); }
+  } finally { if (!response.body?.locked) await response.body?.cancel(); }
+  if (bytes.length < 42 || bytes.toString('ascii', 0, 4) !== 'fLaC' ||
+      (bytes[4] & 127) !== 0 || bytes.readUIntBE(5, 3) !== 34) throw new Error('Provider bytes are not FLAC STREAMINFO');
+  const packed = bytes.readBigUInt64BE(18);
+  const sampleRateFromBytes = Number(packed >> 44n);
+  const depthFromBytes = Number((packed >> 36n) & 31n) + 1;
+  if (sampleRateFromBytes <= 0 || sampleRateFromBytes > 655350 || depthFromBytes < 4) throw new Error('Invalid FLAC STREAMINFO');
+  const bitDepth = depthFromBytes;
+  let sampleRate = sampleRateFromBytes;
   if (sampleRate > 0 && sampleRate < 1000) sampleRate *= 1000;
   const lossless = ['flac', 'alac'].includes(String(stream.codec).toLowerCase());
   return {
     url: url.href,
-    format: stream.format,
-    codec: stream.codec,
-    container: stream.container,
+    format: 'flac',
+    codec: 'flac',
+    container: 'flac',
     quality: lossless ? ((bitDepth > 16 || sampleRate > 48000) ? 'Hi-Res Lossless' : 'Lossless') : 'Lossy',
     ...(sampleRate > 0 ? { sampleRate } : {}),
     ...(bitDepth > 0 ? { bitDepth } : {}),

@@ -2,7 +2,7 @@
 
 A single BitChord-compatible HTTP addon aggregating Qobuz, Tidal and Amazon Music metadata behind one search endpoint and routing streams to the correct provider.
 
-## Compatibility and current limitations (0.7.0)
+## Compatibility and current limitations (0.7.1)
 
 Targets the official Android BitChord **1.9.1** addon-auth v1 contract, checked
 2026-11-10 against client main `acf219a7e4a7f52f026d4336d5c7ac5cf7bfafcc`.
@@ -28,13 +28,35 @@ Health is exempt only on container loopback for Docker's healthcheck. Provider
 is not owner authorization. Keep session provisioning private and external to
 this public API. Health confirms process initialization, not playable audio.
 
-Qobuz metadata search works. Playback on the deployed upstream session still
-fails `503 verification_required`: its bootstrap expects session credentials or
-a verification URL, but the current provider returns challenge_id/server_nonce/
-expires_in/turnstile_site_key. This fork does not fabricate sessions, automate
-CAPTCHAs or claim to fix that separate provider protocol mismatch. Tidal/Amazon
-require separately authenticated external backends; neither is enabled on the
-reference deployment. No paid backend or media cache was added.
+Qobuz metadata search works; playback is **pending human provider verification**.
+Version 0.7.1 builds the missing v2grant challenge URL from `challenge_id`, matching
+[official Mornye protocol.rs](https://github.com/mornyeapp/Mornye/blob/45df9860661e9c4e731ef26a60c44b2b5d8cf125/rust_backend/crates/extensions/src/signed_session/protocol.rs#L93)
+and [exchange.rs](https://github.com/mornyeapp/Mornye/blob/45df9860661e9c4e731ef26a60c44b2b5d8cf125/rust_backend/crates/extensions/src/signed_session/exchange.rs#L159).
+The official API page performs Turnstile in the user's browser and offers a
+copy-link fallback containing the full callback URL. This provider challenge is
+separate from BitChord's device proof. No CAPTCHA automation or native app proof
+is fabricated. Tidal/Amazon remain separately configured external backends.
+
+Private operator provisioning (run in the container; no web admin route):
+
+    node src/provider-session-cli.js start /data/operator-link.txt
+
+Privately open that file's URL in a normal browser immediately (current provider
+challenge expires in 180 seconds). Complete the provider's human verification.
+If the browser offers to open SpotiFLAC, use the page's manual copy-link fallback
+instead; copy the **full** callback URL, including state and grant, into
+`/data/operator-callback.txt`, owner uid1000, mode600, without putting it in argv,
+shell history or chat. Then run:
+
+    node src/provider-session-cli.js complete /data/operator-callback.txt
+
+A successful exchange deletes the input callback file and persists session
+credentials mode600. The server rereads the session before resolving streams;
+no restart needed. An expired challenge requires a new start command with a new
+output filename. A rejected session is invalidated; failed exchanges are sanitized.
+No automatic refresh is added: expired sessions require fresh verification.
+Do not expose `/data`, the link, callback or session file. Real human completion,
+exchange and playback remain unverified until the operator finishes this step.
 
 Streams must be explicit HTTPS, non-DRM URLs on public IPs, without userinfo or
 custom ports. Only provider URLs with recognized expiry (`exp`, `expires`,
@@ -43,9 +65,14 @@ or permanent provider URLs fail closed (502) until a supported expiring URL is
 available; the addon cannot shorten a third-party URL's lifetime itself. It does
 not proxy media or forward app/provider headers to the player. Actual expiry is
 enforced by the trusted provider; there is no claim of verifying its signature.
-FLAC/ALAC quality derives from returned depth/rate, with sample rate normalized
-to Hz, never the selected tier. No Atmos capability is advertised or invented.
-`allowDownloads: false` declares playback-only use. No full media is cached.
+All exposed tiers require FLAC bytes: a Range request for bytes0–1023 must return206
+and a valid leading STREAMINFO block; quality/depth/rate come from those bytes,
+never catalogue metadata or the selected tier. Opus/AAC/MP3, mislabeled bytes and
+ALAC (no bounded MP4 parser yet) fail unavailable. This verifies the delivered
+codec, not the recording provenance or whether the provider previously transcoded. No Atmos capability is advertised or invented.
+`allowDownloads: false` declares playback-only use. Only the bounded header is read; no full media is cached.
+Official docs target15–30 minutes and require at least5; existing5–30-minute
+remaining-lifetime acceptance is retained.
 
 Run `npm test` (zero npm dependencies): crypto fixtures, cache/rotation,
 issuer/audience/time/host failures, HTTP middleware/discovery, provider verification
