@@ -13,6 +13,7 @@ export function publicAddress(address) {
 }
 
 export async function validateStream(stream, { now = Date.now(), resolve = lookup, probe = fetch } = {}) {
+  const started = performance.now();
   const url = new URL(stream.url);
   if (url.protocol !== 'https:' || url.username || url.password || url.hash ||
       (url.port && url.port !== '443') || stream.encrypted || /atmos|eac3|joc/i.test(stream.codec || '')) {
@@ -24,19 +25,24 @@ export async function validateStream(stream, { now = Date.now(), resolve = looku
   // for a permanent URL. Never fetch media or send BitChord/provider credentials.
   let exp = Number(url.searchParams.get('exp') || url.searchParams.get('expires') || url.searchParams.get('Expires')) * 1000;
   // Qobuz's actual Akamai URLs use etsp (epoch seconds) plus a URL-safe
-  // HMAC. Recognize only the observed vendor host/shape; preserve TTL bounds.
+  // HMAC. Only this observed vendor shape gets the compatibility ceiling.
+  // BitChord recommends 15–30m; Qobuz normally issues ~55m capabilities.
+  // These contain media authorization, never the private provider session.
+  let maxRemaining = 1800000;
   if (url.hostname === 'streaming-qobuz-std.akamaized.net' &&
       /^\d{10}$/.test(url.searchParams.get('etsp') || '') &&
-      /^[A-Za-z0-9_-]{27}$/.test(url.searchParams.get('hmac') || '')) {
+      /^[A-Za-z0-9_-]{27}$/.test(url.searchParams.get('hmac') || '') &&
+      [...url.searchParams.keys()].every(k => ['uid', 'eid', 'fmt', 'profile', 'app_id', 'cid', 'etsp', 'hmac'].includes(k) && url.searchParams.getAll(k).length === 1)) {
     exp = Number(url.searchParams.get('etsp')) * 1000;
+    maxRemaining = 3600000;
   }
   const date = url.searchParams.get('X-Amz-Date');
   const ttl = Number(url.searchParams.get('X-Amz-Expires'));
   if (date && /^\d{8}T\d{6}Z$/.test(date) && ttl > 0) {
     exp = Date.parse(date.replace(/^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/, '$1-$2-$3T$4:$5:$6Z')) + ttl * 1000;
   }
-  if (!Number.isFinite(exp) || exp - now < 300000 || exp - now > 1800000) {
-    throw new Error('Provider must supply a signed URL with 5–30 minutes remaining');
+  if (!Number.isFinite(exp) || exp - now < 300000 || exp - now > maxRemaining) {
+    throw new Error('Provider must supply a signed URL with 5–30 minutes remaining (Qobuz Akamai: up to 60)');
   }
   if (!['flac', 'alac', 'aac', 'mp3', 'opus'].includes(String(stream.codec).toLowerCase())) throw new Error('Unknown codec');
   // This addon promises lossless for every exposed quality tier. Metadata alone
@@ -66,6 +72,8 @@ export async function validateStream(stream, { now = Date.now(), resolve = looku
   const sampleRateFromBytes = Number(packed >> 44n);
   const depthFromBytes = Number((packed >> 36n) & 31n) + 1;
   if (sampleRateFromBytes <= 0 || sampleRateFromBytes > 655350 || depthFromBytes < 4) throw new Error('Invalid FLAC STREAMINFO');
+  // The probe can take time: do not return a URL now inside the client cache window.
+  if (exp - (now + performance.now() - started) < 300000) throw new Error('Media URL expires too soon');
   const bitDepth = depthFromBytes;
   let sampleRate = sampleRateFromBytes;
   if (sampleRate > 0 && sampleRate < 1000) sampleRate *= 1000;

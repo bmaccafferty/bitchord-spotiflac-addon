@@ -28,7 +28,7 @@ Health is exempt only on container loopback for Docker's healthcheck. Provider
 is not owner authorization. Keep session provisioning private and external to
 this public API. Health confirms process initialization, not playable audio.
 
-Qobuz catalogue and playback are **pending human provider verification**.
+Qobuz catalogue and playback require a legitimate, unexpired human-verified provider session.
 Before challenge handling was corrected, metadata could use the old error fallback;
 the supported current challenge path reports VERIFY_REQUIRED until verified.
 Version 0.7.1 builds the missing v2grant challenge URL from `challenge_id`, matching
@@ -57,12 +57,13 @@ credentials mode600. The server rereads the session before resolving streams;
 no restart needed. An expired challenge requires a new start command with a new
 output filename. A rejected session is invalidated; failed exchanges are sanitized.
 No automatic refresh is added: expired sessions require fresh verification.
-Do not expose `/data`, the link, callback or session file. Real human completion,
-exchange and playback remain unverified until the operator finishes this step.
+Do not expose `/data`, the link, callback or session file. Complete this operator step before expecting playback.
 
 Streams must be explicit HTTPS, non-DRM URLs on public IPs, without userinfo or
 custom ports. Only provider URLs with recognized expiry (`exp`, `expires`,
-`Expires`, or AWS date/TTL) and 5–30 minutes remaining are returned. Unrecognized
+`Expires`, or AWS date/TTL) and 5–30 minutes remaining are returned. The exact
+`streaming-qobuz-std.akamaized.net` host with ten-digit `etsp` and 27-character
+URL-safe `hmac` accepts 5–60 minutes, matching observed ~55-minute vendor URLs. Unrecognized
 or permanent provider URLs fail closed (502) until a supported expiring URL is
 available; the addon cannot shorten a third-party URL's lifetime itself. It does
 not proxy media or forward app/provider headers to the player. Actual expiry is
@@ -73,8 +74,14 @@ never catalogue metadata or the selected tier. Opus/AAC/MP3, mislabeled bytes an
 ALAC (no bounded MP4 parser yet) fail unavailable. This verifies the delivered
 codec, not the recording provenance or whether the provider previously transcoded. No Atmos capability is advertised or invented.
 `allowDownloads: false` declares playback-only use. Only the bounded header is read; no full media is cached.
-Official docs target15–30 minutes and require at least5; existing5–30-minute
-remaining-lifetime acceptance is retained.
+The [official guide](https://bitchord.kushagrasingh.in/docs#short-lived-media-urls)
+asks for 15–30 minutes and never less than 5, but states no mandatory maximum
+or client rejection above 30. This narrow Qobuz compatibility exception extends
+the capability sharing window to at most 60 minutes; actual expiry is unchanged
+and enforced by the CDN. Unknown/expired/under-five-minute URLs fail closed.
+The URL contains a media capability, not the private signed-session credentials.
+No media proxy, file cache or transcoding is introduced. This supports observed
+Qobuz FLAC URLs, not every provider or URL signing scheme.
 
 Run `npm test` (zero npm dependencies): crypto fixtures, cache/rotation,
 issuer/audience/time/host failures, HTTP middleware/discovery, provider verification

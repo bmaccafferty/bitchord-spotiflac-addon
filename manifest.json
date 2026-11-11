@@ -1,7 +1,7 @@
 {
   "id": "com.pavan.bitchord.spotiflac.multisource",
   "name": "SpotiFLAC Multi-Source Lossless",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "resources": [
     "search",
     "stream"
