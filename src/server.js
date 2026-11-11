@@ -1,4 +1,6 @@
 import http from 'node:http';
+import { createBitChordAuth } from './bitchord-addon-auth.mjs';
+import { validateStream } from './stream-contract.js';
 import { URL } from 'node:url';
 import { SpotiFLACQobuzHost } from './spotiflac-qobuz-host.js';
 import { amazonConfigured, amazonHealth, amazonResolveStream, amazonSearch } from './providers/http-amazon.js';
@@ -6,7 +8,14 @@ import { tidalConfigured, tidalHealth, tidalResolveStream, tidalSearch } from '.
 
 const PORT = Number(process.env.PORT || 8080);
 const NAME = process.env.ADDON_NAME || 'SpotiFLAC Multi-Source Lossless';
-const VERSION = process.env.ADDON_VERSION || '0.6.0';
+const VERSION = '0.7.0';
+const hosts = String(process.env.BITCHORD_HOSTS || '').split(',').map(h => h.trim()).filter(Boolean);
+if (!hosts.length || hosts.some(h => !/^[a-z0-9]+(?:[.-][a-z0-9]+)*$/i.test(h))) {
+  throw new Error('BITCHORD_HOSTS must list the public addon hostnames without scheme, port or path');
+}
+const bitchord = createBitChordAuth({ hosts, fetch: (url, options) => fetch(url, {
+  ...options, redirect: 'error', signal: AbortSignal.timeout(10000)
+}) });
 const ENABLE_TIDAL = String(process.env.ENABLE_TIDAL || 'true').toLowerCase() !== 'false';
 const ENABLE_AMAZON = String(process.env.ENABLE_AMAZON || 'true').toLowerCase() !== 'false';
 
@@ -15,6 +24,8 @@ const MANIFEST = {
   name: NAME,
   version: VERSION,
   resources: ['search', 'stream'],
+  bitchordAuth: true,
+  allowDownloads: false,
   settings: [
     {
       key: 'quality',
@@ -64,6 +75,7 @@ function cacheGet(key) {
 }
 
 function cacheSet(key, value, ttl = 60000) {
+  if (searchCache.size >= 256) searchCache.delete(searchCache.keys().next().value);
   searchCache.set(key, { value, expires: Date.now() + ttl });
   return value;
 }
@@ -80,7 +92,7 @@ function qobuzAudioQuality(track) {
   if (value) return value.toUpperCase().replace(/\s+/g, '_');
   const depth = Number(track.maximum_bit_depth || 0);
   const rate = Number(track.maximum_sampling_rate || 0);
-  return depth >= 24 || rate >= 88200 ? 'HI_RES_LOSSLESS' : 'LOSSLESS';
+  return depth >= 24 || (rate >= 88.2 && rate < 1000) || rate >= 88200 ? 'HI_RES_LOSSLESS' : 'LOSSLESS';
 }
 
 function normalizeQobuzTrack(track) {
@@ -119,19 +131,19 @@ async function searchAll(q, quality) {
         if (status.verification_required || !status.authenticated || String(error?.message || error).includes('VERIFY_REQUIRED')) {
           return [];
         }
-        console.error('[BitChord] Qobuz search error:', error?.message || error);
+        console.error('[BitChord] Qobuz search failed');
         return [];
       }));
   }
   if (ENABLE_TIDAL && tidalConfigured()) {
     jobs.push(tidalSearch(q, 25).catch(error => {
-      console.error('[BitChord] Tidal search error:', error?.message || error);
+      console.error('[BitChord] Tidal search failed');
       return [];
     }));
   }
   if (ENABLE_AMAZON && amazonConfigured()) {
     jobs.push(amazonSearch(q, 25).catch(error => {
-      console.error('[BitChord] Amazon search error:', error?.message || error);
+      console.error('[BitChord] Amazon search failed');
       return [];
     }));
   }
@@ -142,7 +154,7 @@ async function searchAll(q, quality) {
 }
 
 async function handle(req, res) {
-  const u = new URL(req.url || '/', 'http://' + (req.headers.host || 'localhost'));
+  const u = new URL(req.url || '/', 'http://localhost');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
@@ -154,6 +166,22 @@ async function handle(req, res) {
   }
 
   if (req.method !== 'GET') return json(res, 405, { error: 'method_not_allowed' });
+
+  if (u.pathname === '/manifest.json') return json(res, 200, MANIFEST);
+
+  // Health is local to the container, never a public authentication bypass.
+  const localHealth = u.pathname === '/health' && ['127.0.0.1', '::1'].includes(req.socket.remoteAddress);
+  if (!localHealth) {
+    const result = await bitchord.verifyRequest(req);
+    if (!result.ok) {
+      const denied = bitchord.rejection(result);
+      res.writeHead(denied.status, denied.headers);
+      return res.end(denied.body);
+    }
+  }
+
+  // Provider session management is an operator action, never an app capability.
+  if (u.pathname.startsWith('/auth/')) return json(res, 404, { error: 'not_found' });
 
   if (u.pathname === '/health') {
     const q = qobuzHost?.authStatus?.() || {};
@@ -174,39 +202,6 @@ async function handle(req, res) {
         amazon
       }
     });
-  }
-
-  if (u.pathname === '/manifest.json') return json(res, 200, MANIFEST);
-
-  if (u.pathname === '/auth/status') {
-    if (!qobuzHost) return json(res, 503, { error: 'provider_unavailable', detail: qobuzStartupError });
-    const status = qobuzHost.authStatus();
-    return json(res, 200, {
-      authenticated: Boolean(status.authenticated),
-      verificationRequired: Boolean(status.verification_required),
-      authUrl: status.auth_url || undefined,
-      expiresAt: status.expires_at || undefined
-    });
-  }
-
-  if (u.pathname === '/auth/start') {
-    if (!qobuzHost) return json(res, 503, { error: 'provider_unavailable', detail: qobuzStartupError });
-    const result = qobuzHost.startAuth();
-    if (result.needsVerification || result.auth_url) {
-      return json(res, 200, {
-        authenticated: false,
-        verificationRequired: true,
-        authUrl: result.auth_url || qobuzHost.authStatus().auth_url
-      });
-    }
-    return json(res, 200, result);
-  }
-
-  if (u.pathname === '/auth/complete') {
-    if (!qobuzHost) return json(res, 503, { error: 'provider_unavailable', detail: qobuzStartupError });
-    const value = u.searchParams.get('grant') || u.searchParams.get('callback') || '';
-    const result = qobuzHost.completeAuth(value);
-    return json(res, result.success ? 200 : 400, result);
   }
 
   if (u.pathname === '/search') {
@@ -230,17 +225,17 @@ async function handle(req, res) {
         if (!qobuzHost) return json(res, 503, { error: 'provider_unavailable' });
         const status = qobuzHost.authStatus();
         if (status.verification_required || !status.authenticated) return authError(res);
-        return json(res, 200, qobuzHost.resolveStream(id.slice('qobuz:'.length), quality));
+        return json(res, 200, await validateStream(qobuzHost.resolveStream(id.slice('qobuz:'.length), quality)));
       }
 
       if (id.startsWith('tidal:')) {
         if (!ENABLE_TIDAL || !tidalConfigured()) return json(res, 503, { error: 'provider_unavailable' });
-        return json(res, 200, await tidalResolveStream(id, quality));
+        return json(res, 200, await validateStream(await tidalResolveStream(id, quality)));
       }
 
       if (id.startsWith('amazon:')) {
         if (!ENABLE_AMAZON || !amazonConfigured()) return json(res, 503, { error: 'provider_unavailable' });
-        return json(res, 200, await amazonResolveStream(id, quality));
+        return json(res, 200, await validateStream(await amazonResolveStream(id, quality)));
       }
 
       return json(res, 404, { error: 'track_not_found' });
@@ -252,7 +247,7 @@ async function handle(req, res) {
       if (message.includes('not found') || message.includes('track_not_found')) {
         return json(res, 404, { error: 'track_not_found' });
       }
-      console.error('[BitChord] Stream resolution error:', message);
+      console.error('[BitChord] Stream resolution failed');
       return json(res, 502, { error: 'provider_unavailable' });
     }
   }
@@ -260,6 +255,11 @@ async function handle(req, res) {
   return json(res, 404, { error: 'not_found' });
 }
 
-http.createServer(handle).listen(PORT, '0.0.0.0', () => {
+export const server = http.createServer((req, res) => {
+  handle(req, res).catch(() => {
+    if (!res.headersSent) json(res, 400, { error: 'invalid_request' });
+    else res.end();
+  });
+}).listen(PORT, '0.0.0.0', () => {
   console.log(`[BitChord] Multi-source addon v${VERSION} listening on :${PORT}`);
 });

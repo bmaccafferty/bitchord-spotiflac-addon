@@ -86,7 +86,8 @@ export async function tidalResolveStream(id, quality = 'lossless') {
   if (!url && typeof track.manifest === 'string' && /^https?:\/\//.test(track.manifest)) url = track.manifest;
   if (!url) throw new Error('Tidal response did not contain a playable URL');
 
-  const codec = decoded?.codecs || decoded?.codec || (track.audioQuality === 'LOSSLESS' ? 'flac' : 'flac');
+  const codec = decoded?.codecs || decoded?.codec;
+  if (!codec || String(codec).toLowerCase() !== 'flac') throw new Error('Tidal did not confirm FLAC');
   return {
     url,
     format: 'flac',

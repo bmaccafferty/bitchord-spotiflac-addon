@@ -473,8 +473,7 @@ export class SpotiFLACQobuzHost {
     return {
       url: String(info.directURL),
       format: 'flac',
-      quality: qualityCode === 'HI_RES_LOSSLESS' ? 'Hi-Res Lossless' :
-        qualityCode === 'HI_RES' ? 'Hi-Res' : 'Lossless',
+      quality: Number(info.bitDepth) > 16 || Number(info.sampleRate) > 48000 ? 'Hi-Res Lossless' : 'Lossless',
       codec: 'flac',
       container: 'flac',
       manifest: 'none',
