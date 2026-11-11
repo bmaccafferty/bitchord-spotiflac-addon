@@ -28,7 +28,9 @@ Health is exempt only on container loopback for Docker's healthcheck. Provider
 is not owner authorization. Keep session provisioning private and external to
 this public API. Health confirms process initialization, not playable audio.
 
-Qobuz metadata search works; playback is **pending human provider verification**.
+Qobuz catalogue and playback are **pending human provider verification**.
+Before challenge handling was corrected, metadata could use the old error fallback;
+the supported current challenge path reports VERIFY_REQUIRED until verified.
 Version 0.7.1 builds the missing v2grant challenge URL from `challenge_id`, matching
 [official Mornye protocol.rs](https://github.com/mornyeapp/Mornye/blob/45df9860661e9c4e731ef26a60c44b2b5d8cf125/rust_backend/crates/extensions/src/signed_session/protocol.rs#L93)
 and [exchange.rs](https://github.com/mornyeapp/Mornye/blob/45df9860661e9c4e731ef26a60c44b2b5d8cf125/rust_backend/crates/extensions/src/signed_session/exchange.rs#L159).
